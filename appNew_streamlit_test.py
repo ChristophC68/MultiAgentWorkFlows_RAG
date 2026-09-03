@@ -1,3 +1,5 @@
+# python -m streamlit run streamlit_test.py [--DATA_ROOT_DIR="/home/christopher/Downloads/Databricks"]
+
 # 3 september install: python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 
 # https://docs.streamlit.io/get-started/fundamentals/main-concepts
@@ -631,7 +633,7 @@ def main_download_prepare_chunk():
         all_chunks = do_chunking(documents_to_chunk, chunk_size, overlap)
             
         print(f"*** Total chunks created across all documents: {len(all_chunks)} ***\n")
-        return "Success"     
+        return "Success", all_chunks     
     
     except Exception as e:
         print("\n" + "="*40 + " ACTUAL ERROR CAUGHT " + "="*40)
@@ -644,15 +646,9 @@ def main_download_prepare_chunk():
             traceback.print_exc(file=log_file)
         print(f"\n[INFO] Full error log has also been saved to {logDOWNLOAD}.")  
         
-        return "Failure"  
+        return "Failure", []
     
- 
-# run this straight away if it's just being run as a script, if not hold back because this script is probably being imported by the UI    
-if __name__ == "__main__":    
-    
-    str_Progress = main_download_prepare_chunk()
-       
-        
+def main_generate_vectors_and_save(all_chunks):      
     try: 
     
         # chunk_texts_only  = save_Chunks_To_Disk(all_chunks, strPath, saveFormat)
@@ -671,6 +667,9 @@ if __name__ == "__main__":
         insert_result = False
         # THE EMBEDDINGS NEED TO BE COMBINED WITH THE all_chunks (original text, id and source), and then everything can be added to the collection
         insert_result = save_embeddings_in_vectorstore (chunk_texts_only, chunk_sources, chunk_ids, embeddings)
+        
+        if insert_result:
+            return "Success"
     
     except Exception as e:
             print("\n" + "="*40 + " ACTUAL ERROR CAUGHT " + "="*40)
@@ -682,6 +681,15 @@ if __name__ == "__main__":
             with open(logEMBEDDING, "w") as log_file:
                 traceback.print_exc(file=log_file)
             print(f"\n[INFO] Full error log has also been saved to {logEMBEDDING}.") 
+            return "Failure"
+    
+ 
+# run this straight away if it's just being run as a script, if not hold back because this script is probably being imported by the UI    
+if __name__ == "__main__":    
+    
+    str_Progress, all_chunks = main_download_prepare_chunk()
+    
+    str_Progress = main_generate_vectors_and_save(all_chunks)   
             
     #################################################################################################
     #

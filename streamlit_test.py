@@ -32,6 +32,9 @@ with st.form("my form"):
     submitted = st.form_submit_button("Submit")
 
     if submitted:
-        text = RAGapp.main_download_prepare_chunk()
-        st.info(text)
+        text, all_chunks = RAGapp.main_download_prepare_chunk()
+        st.info(f"Downloading, cleaning and preparing chunks:{text}")
+        
+        text = RAGapp.main_generate_vectors_and_save(all_chunks)
+        st.info(f"Generating and storing vectors:{text}")
         
