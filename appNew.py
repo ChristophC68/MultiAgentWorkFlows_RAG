@@ -63,6 +63,29 @@ from pymilvus import MilvusClient, DataType
 import ollama
 import time
 
+# logging files
+#logSPARK="error_log_SPARK.txt"
+logMILVUS = "error_log_MILVUS.txt"
+logLLM = "error_logLLM.txt"
+logVECTOR = "error_logVECTOR.txt"
+logDOWNLOAD = "error_logDOWNLOAD.txt"
+logEMBEDDING = "error_logEMBEDDING"
+
+chunk_size=20
+overlap = 10
+embedding_dim = 768
+collection_name = "covid_medical_rag_docs"
+
+saveFormat = "parquet"
+
+VECTOR_SEARCH_LIMIT = 5
+
+model_LLM ='qwen2.5:latest'
+
+instructionPrompt= ("You are a helpful medical data assistant. Your job is to summarize "
+                    "the provided context documents into a single, comprehensive, cohesive answer. "
+                    "Only use facts directly mentioned in the context. Do not make up information." )
+
 
 # Define chunking logic with overlap
 def chunk_text(text, chunk_size=200, overlap=50):
@@ -108,7 +131,7 @@ def chunk_text(text, chunk_size=200, overlap=50):
     except Exception as e:
             print(f"Error Type: {type(e).__name__}")
             print(f"Error Message: {e}")
-            return " "
+            return []
 
 
 # Utility: Clean extracted text
@@ -229,6 +252,7 @@ def download_and_prepare(documents):
             response = requests.get(url, timeout=30)
             response.raise_for_status()
             print(f"Length of downloaded pdf file content: {len(response.content)}")
+            
             # save each pdf
             full_path = os.path.join(dbfs_dir, filename)
             print(f"saving pdf: {full_path}")
@@ -268,13 +292,7 @@ def do_chunking(documents_to_chunk, chunk_size=100, chunk_overlap=50):
     {"source": str(txt_filename), "text": extracted_text, "publication date": 0}
     
     Returns:
-        _type_: list
-        each item in the list will be like this:
-        {
-            "source": doc["source"],
-            "chunk_id": i,
-            "text": chunk
-        }
+    
     """
 
     try: 
@@ -293,26 +311,22 @@ def do_chunking(documents_to_chunk, chunk_size=100, chunk_overlap=50):
                     "chunk_id": i,
                     "text": chunk
                 })
+            
             # all_chunks created by do_chunking routine: {"source": doc["source"], "chunk_id": i, "text": chunk}
             print(f"Chunking Statistics:")
             print(f"{doc["source"]} Total chunks created: {len(chunks)}")             
             print("\n" + "="*30)
-                  
-            
+                        
         return all_chunks
             
     except Exception as e:
         print("\n" + "="*40 + " ERROR CAUGHT " + "="*40)
-        # This prints just the core error summary message
         print(f"Error Type: {type(e).__name__}")
         print(f"Error Message: {e}")
         print("="*100)
         
-        # Optional: This writes the full log to local drive so you can open it easily
-        with open("error_log.txt", "a") as log_file:
-            traceback.print_exc(file=log_file)
-        print("\n[INFO] Full error log has also been saved to 'error_log.txt'.")
         return[]
+    
 
 def save_Chunks_To_Disk(all_chunks, strPath, saveFormat="delta"): 
     """_summary_
@@ -356,123 +370,139 @@ def save_Chunks_To_Disk(all_chunks, strPath, saveFormat="delta"):
           
         # Ensure your DataFrame column names match 
         # all_chunks created by do_chunking routine: {"source": doc["source"], "chunk_id": i, "text": chunk}
-        chunk_texts = df["text"].tolist() # we only want to return the texts for the embeddings
-        # we need these as a separate list for the later use of zip
-        chunk_sources = df["source"].tolist() 
+        chunk_texts = df["text"].tolist()       # we only want to return the texts for the embeddings
+        chunk_sources = df["source"].tolist()   # we need these as a separate list for the later use of zip
         chunk_ids = df["chunk_id"].tolist()
-        #chunks_list = df.values.tolist() # this we will need to later combine with the new embeddings
+        #chunks_list = df.values.tolist()       # this we will need to later combine with the new embeddings
         print(f"Successfully loaded {len(chunk_texts)} text chunks.")
         return chunk_texts, chunk_sources, chunk_ids
         
     except Exception as e:
         print("\n" + "="*40 + " In save_Chunks_To_Disk - ACTUAL ERROR CAUGHT " + "="*40)
-        # This prints just the core error summary message
         print(f"Error Type: {type(e).__name__}")
         print(f"Error Message: {e}")
         print("="*100)
         
-        # Optional: This writes the full log to local drive so you can open it easily
-        with open("spark_error_log.txt", "w") as log_file:
-            traceback.print_exc(file=log_file)
-        print("\n[INFO] Full error log has also been saved to 'spark_error_log.txt'.")
-        return[]
-    
-    
+milvus_client = None
+        #milvus_client = start_Milvus(collection_name, str_milvus_path, embedding_dim)
+        
+           
 def start_Milvus(collection_name, str_milvus_path, embedding_dim):
     # https://milvus.io/docs/schema.md
+    try:
+        print("\nIn start_Milvus....")
+        
+        # need to create a schema rather than relying on Milvus to create the default one as that would consist of just vector and PK
+        # schema needed
+        # id       primary key
+        # vector   FLOAT_VECTOR
+        # text     VARCHAR
+        # source   VARCHAR
+        
+        schema = MilvusClient.create_schema()
+        
+        schema.add_field(
+            field_name="id",
+            datatype=DataType.INT64,
+            is_primary=True,
+            auto_id=False,
+        )
+        schema.add_field(
+            field_name="vector",
+            datatype=DataType.FLOAT_VECTOR,
+            dim=embedding_dim
+        )
+        schema.add_field(
+            field_name="text",
+            datatype=DataType.VARCHAR,
+            max_length=16384
+        )
+        schema.add_field(
+            field_name="source",
+            datatype=DataType.VARCHAR,
+            max_length=512
+        )
+        
+        # Initialize Milvus Lite
+        print("Connecting to local Milvus Lite...")
+        milvus_client = MilvusClient(str_milvus_path)
+        
+        # Drop if it already exists to prevent duplication errors during development
+        if milvus_client.has_collection(collection_name):
+            milvus_client.drop_collection(collection_name)
+            print("\n dropping existing collection")
+            
+        milvus_client.create_collection(
+            collection_name=collection_name,
+            schema=schema
+        )
+        print(f"Created Milvus collection: {collection_name}")
+                
+        return milvus_client
+        
+        
+        # index_params = milvus_client.prepare_index_params()
+        # index_params.add_index(
+        #     field_name="source",
+        #     index_type="AUTOINDEX",
+        #     index_name="publisher_index"
+        # )
+        
+        # # Index `embedding` with AUTOINDEX and specify metric_type
+        # index_params.add_index(
+        #     field_name="vector",
+        #     index_type="AUTOINDEX",  # Use automatic indexing to simplify complex index settings
+        #     metric_type="COSINE"  # Specify similarity metric type, options include L2, COSINE, or IP
+        # )
+        # milvus_client.create_collection(
+        #     collection_name=collection_name,
+        #     schema=schema,
+        #     index_params=index_params
+        # )
+        
+        
     
-    # need to create a schema rather than relying on Milvus to create the default one as that would consist of just vector and PK
-    
-    # schema needed
-    # id       → primary key
-    # vector   → FLOAT_VECTOR
-    # text     → VARCHAR
-    # source   → VARCHAR
-    schema = MilvusClient.create_schema()
-    schema.add_field(
-        field_name="id",
-        datatype=DataType.INT64,
-        is_primary=True,
-        auto_id=False,
-    )
-    schema.add_field(
-        field_name="vector",
-        datatype=DataType.FLOAT_VECTOR,
-        dim=embedding_dim
-    )
-    schema.add_field(
-        field_name="text",
-        datatype=DataType.VARCHAR,
-        max_length=16384
-    )
-    schema.add_field(
-        field_name="source",
-        datatype=DataType.VARCHAR,
-        max_length=512
-    )
-    
-    
-    
-    # Initialize Milvus Lite
-    print("Connecting to local Milvus Lite...")
-    milvus_client = MilvusClient(str_milvus_path)
-    
-    # index_params = milvus_client.prepare_index_params()
-    # index_params.add_index(
-    #     field_name="source",
-    #     index_type="AUTOINDEX",
-    #     index_name="publisher_index"
-    # )
-    
-    # # Index `embedding` with AUTOINDEX and specify metric_type
-    # index_params.add_index(
-    #     field_name="vector",
-    #     index_type="AUTOINDEX",  # Use automatic indexing to simplify complex index settings
-    #     metric_type="COSINE"  # Specify similarity metric type, options include L2, COSINE, or IP
-    # )
-
-    # Drop if it already exists to prevent duplication errors during development
-    if milvus_client.has_collection(collection_name):
-        milvus_client.drop_collection(collection_name)
-
-    # # Create collection automatically mapping schema from the data we insert
-    # milvus_client.create_collection(collection_name=collection_name, dimension=embedding_dim)
-    
-    # milvus_client.create_collection(
-    #     collection_name=collection_name,
-    #     schema=schema,
-    #     index_params=index_params
-    # )
-    milvus_client.create_collection(
-        collection_name=collection_name,
-        schema=schema
-    )
-    
-    print(f"Created Milvus collection: {collection_name}")
-    
-    return milvus_client
+    except Exception as e:
+        print("\n" + "="*40 + " In start_Milvus - ACTUAL ERROR CAUGHT " + "="*40)
+        print(f"Error Type: {type(e).__name__}")
+        print(f"Error Message: {e}")
+        print("="*100)
+        
+        return None
 
 
 
 def generate_embeddings(texts_list, model):
+    try:
     
-    # Generate the Vector Embeddings
-    print("\n" + "="*30)
-    print("Generating text embeddings (this may take a moment)...")
-    embeddings = model.encode(texts_list, show_progress_bar=True)
+        # Generate the Vector Embeddings
+        print("\n" + "="*30)
+        print("Generating text embeddings (this may take a moment)...")
+        
+        embeddings = model.encode(texts_list, show_progress_bar=True)
+        
+        print("...text embeddings generated.")
+        return embeddings
     
-    return embeddings
+    except Exception as e:
+        print("\n" + "="*40 + " In save_Chunks_To_Disk - ACTUAL ERROR CAUGHT " + "="*40)
+        print(f"Error Type: {type(e).__name__}")
+        print(f"Error Message: {e}")
+        print("="*100)
+        return None
+            
 
-
-
-def save_embeddings_in_vectorstore(chunk_texts_only, chunk_sources, chunk_ids, embeddings, collection_name, embedding_dim):   
+def save_embeddings_in_vectorstore(chunk_texts_only, chunk_sources, chunk_ids, embeddings):   
     try:
         insert_result = False
         print("\nIn save_embeddings_in_vectorstore")
-        # Warm up Milvus
+        
+        
+        # Warm up Milvus - using helper start_Milvus
         milvus_client = None
         milvus_client = start_Milvus(collection_name, str_milvus_path, embedding_dim)
         
+              
         # Prepare and Insert Data
         print("\nFormatting data for Milvus Lite...")
         
@@ -496,6 +526,7 @@ def save_embeddings_in_vectorstore(chunk_texts_only, chunk_sources, chunk_ids, e
         # print(data_to_insert[0]["text"][:50])
         # print(len(data_to_insert[0]["vector"]))
         print(".....  inserting into Milvus Lite...")
+        
         insert_result = milvus_client.insert(collection_name=collection_name, data=data_to_insert)
     
         print(f"\nPipeline complete! Successfully inserted all records into Milvus Lite.")
@@ -505,16 +536,10 @@ def save_embeddings_in_vectorstore(chunk_texts_only, chunk_sources, chunk_ids, e
                 
     except Exception as e:
         print("\n" + "="*40 + "In save_embeddings_in_vectorstore - ACTUAL ERROR CAUGHT " + "="*40)
-        print("\nError while inserting embeddings")
-        # This prints just the core error summary message
         print(f"Error Type: {type(e).__name__}")
         print(f"Error Message: {e}")
         print("="*100)
         
-        # Optional: This writes the full log to local drive so you can open it easily
-        with open("milvus_error_log.txt", "w") as log_file:
-            traceback.print_exc(file=log_file)
-        print("\n[INFO] Full error log has also been saved to 'milvus_error_log.txt'.")
         return False
 
 
@@ -528,6 +553,7 @@ class MilvusLiteLogFilter(logging.Filter):
                 if "AllocTimestamp" in exc_text:
                     return False  # Do not log this record
         return True
+    
  
 # run this straight away if it's just being run as a script, if not hold back because this script is probably being imported by the UI    
 if __name__ == "__main__":    
@@ -573,7 +599,8 @@ if __name__ == "__main__":
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("urllib3").setLevel(logging.WARNING)
     
-    VECTOR_SEARCH_LIMIT = 5
+    
+
 
     documents = {
         "cdc_guidelines.pdf": "https://www.cdc.gov/covid/downloads/hcp/interim-clinical-considerations.pdf",
@@ -584,46 +611,68 @@ if __name__ == "__main__":
     # documents = {
     #         "cdc_guidelines.pdf": "https://www.cdc.gov/covid/downloads/hcp/interim-clinical-considerations.pdf"
     # }
-
+    
+    try:
+                
+        print("\n" + "="*30)
+        print("\nDownloading and cleaning all docs")
+        print("\n" + "="*30)
+        
+        # BRINGS BACK A LIST OF DOCUMENTS WITH SOURCES 
+        documents_to_chunk = []   
+        documents_to_chunk = download_and_prepare(documents)
+        
+        print("\n" + "="*30) 
+        print("\nChunking all Docs")  
+        print("\n" + "="*30)
+    
+        # ALL_CHUNKS IS A LIST OF CHUNKS IN THE FOLLOWING FORM: "source","chunk_id","text"
+        all_chunks = do_chunking(documents_to_chunk, chunk_size, overlap)
             
-    # documents_to_chunk = []
-    print("\n" + "="*30)
-    print("\nDownloading and cleaning all docs")
-    print("\n" + "="*30)
+        print(f"*** Total chunks created across all documents: {len(all_chunks)} ***\n")     
     
-    # BRINGS BACK A LIST OF DOCUMENTS WITH SOURCES    
-    documents_to_chunk = download_and_prepare(documents)
+    except Exception as e:
+        print("\n" + "="*40 + " ACTUAL ERROR CAUGHT " + "="*40)
+        print("\nError Downloading, cleaning and creating text chunks")
+        print(f"Error Type: {type(e).__name__}")
+        print(f"Error Message: {e}")
+        print("="*100)
+                
+        with open(logDOWNLOAD, "w") as log_file:
+            traceback.print_exc(file=log_file)
+        print(f"\n[INFO] Full error log has also been saved to {logDOWNLOAD}.")    
+    
         
-    print("\n" + "="*30) 
-    print("\nChunking all Docs")  
-    print("\n" + "="*30)
-
-    chunk_size=20
-    overlap = 10
-    # ALL_CHUNKS IS A LIST OF CHUNKS IN THE FOLLOWING FORM: "source","chunk_id","text"
-    all_chunks = do_chunking(documents_to_chunk, chunk_size, overlap)
+    try: 
+    
+        # chunk_texts_only  = save_Chunks_To_Disk(all_chunks, strPath, saveFormat)
+        chunk_texts_only, chunk_sources, chunk_ids = save_Chunks_To_Disk(all_chunks, strPath, saveFormat)
+    
+        # Initialize the local Embedding Model 
+        print("\nInitializing sentence-transformers model...")
+        # 'all-MiniLM-L6-v2' generates 384-dimensional vectors, but only a maximum context length of 512 tokens.
+        # Force the Hugging Face transformer model to run strictly on CPU, GPU too small
+        # model = SentenceTransformer('all-MiniLM-L6-v2', device='cpu')
+        model = SentenceTransformer('BAAI/bge-base-en-v1.5', device='cpu')
         
-    print(f"*** Total chunks created across all documents: {len(all_chunks)} ***\n")
-
-    saveFormat = "parquet"
-    # chunk_texts_only  = save_Chunks_To_Disk(all_chunks, strPath, saveFormat)
-    chunk_texts_only, chunk_sources, chunk_ids = save_Chunks_To_Disk(all_chunks, strPath, saveFormat)
-   
-    # Initialize the local Embedding Model 
-    print("\nInitializing sentence-transformers model...")
-    # 'all-MiniLM-L6-v2' generates 384-dimensional vectors
-    # Force the Hugging Face transformer model to run strictly on CPU, GPU too small
-    model = SentenceTransformer('all-MiniLM-L6-v2', device='cpu')
+        # At the moment we are passing too much into this function, we don't want the chunks_list because it contains more than just text
+        embeddings = generate_embeddings(chunk_texts_only, model) # we are deliberately only passing the texts into here
+        
+        insert_result = False
+        # THE EMBEDDINGS NEED TO BE COMBINED WITH THE all_chunks (original text, id and source), and then everything can be added to the collection
+        insert_result = save_embeddings_in_vectorstore (chunk_texts_only, chunk_sources, chunk_ids, embeddings)
     
-    # At the moment we are passing too much into this function, we don't want the chunks_list because it contains more than just text
-    embeddings = generate_embeddings(chunk_texts_only, model) # we are deliberately only passing the texts into here
-    
-    insert_result = False
-    collection_name = "covid_medical_rag_docs"
-    embedding_dim = 384
-    # THE EMBEDDINGS NEED TO BE COMBINED WITH THE all_chunks (original text, id and source), and then everything can be added to the collection
-    insert_result = save_embeddings_in_vectorstore (chunk_texts_only, chunk_sources, chunk_ids, embeddings, collection_name, embedding_dim)
- 
+    except Exception as e:
+            print("\n" + "="*40 + " ACTUAL ERROR CAUGHT " + "="*40)
+            print("\nError creating and saving embeddings")
+            print(f"Error Type: {type(e).__name__}")
+            print(f"Error Message: {e}")
+            print("="*100)
+                    
+            with open(logEMBEDDING, "w") as log_file:
+                traceback.print_exc(file=log_file)
+            print(f"\n[INFO] Full error log has also been saved to {logEMBEDDING}.") 
+            
     #################################################################################################
     #
     #       Our Data download, chunking, embedding creation, vector store saving is complete
@@ -634,11 +683,11 @@ if __name__ == "__main__":
         
         print("\n" + "="*30)
         print("\nAbout the transform user question into vector, search vector store, and build contexts")
-        print("\n" + "="*30)
+        #print("\n" + "="*30)
         
         # Define a sample search question
         user_question = "What are the primary safety guidelines regarding Covid?"
-        print (f"User questions, seeking information for: {user_question}")
+        print (f"User question, seeking information for: {user_question}\n")
         #print("\n" + "="*30)
 
         # Vectorize the question using the same transformer model
@@ -651,12 +700,12 @@ if __name__ == "__main__":
         search_results = milvus_client.search(
             collection_name="covid_medical_rag_docs",
             data=[query_vector],
-            limit=VECTOR_SEARCH_LIMIT,                                # Retrieve the top closest matching chunks
-            output_fields=["source","text","id"]    # Ask Milvus to return the original text and it's source
+            limit=VECTOR_SEARCH_LIMIT,                  # Retrieve the top closest matching chunks
+            output_fields=["source","text","id"]        # Ask Milvus to return the original text and it's source
         )
                                
         for hits in search_results:
-            print("TopK results:")
+            print("TopK results:\n")
             for hit in hits:
                 #print(f"id:{hit['id']}")
                 print(f"distance:{round(hit['distance'],4)}")
@@ -687,24 +736,24 @@ if __name__ == "__main__":
     except Exception as e:
         print("\n" + "="*40 + " ACTUAL ERROR CAUGHT " + "="*40)
         print("\nError processing chunks into vectors")
-        # This prints just the core error summary message
         print(f"Error Type: {type(e).__name__}")
         print(f"Error Message: {e}")
         print("="*100)
                 
-        with open("vector_error_log.txt", "w") as log_file:
+        with open(logVECTOR, "w") as log_file:
             traceback.print_exc(file=log_file)
-        print("\n[INFO] Full error log has also been saved to 'vector_error_log.txt'.")
+        print(f"\n[INFO] Full error log has also been saved to {logVECTOR}.")
   
     try:
         
         # Build a structured prompt context window
-        system_instruction = (
-            "You are a helpful medical data assistant. Your job is to summarize "
-            "the provided context documents into a single, comprehensive, cohesive answer. "
-            "Only use facts directly mentioned in the context. Do not make up information."
-        )
-
+        # system_instruction = (
+        #     "You are a helpful medical data assistant. Your job is to summarize "
+        #     "the provided context documents into a single, comprehensive, cohesive answer. "
+        #     "Only use facts directly mentioned in the context. Do not make up information."
+        # )
+        system_instruction = instructionPrompt
+        
         user_prompt = f"""Based on the following retrieved reference documents, please write a single consolidated summary answering this question: '{user_question}'
 
         ---
@@ -714,34 +763,33 @@ if __name__ == "__main__":
 
         # Consolidated Summary:"""
 
-        # 1. Instantiate a client targeting the host machine - needed for docker
+        # 1. Instantiate a client 
         from ollama import Client
+        
+        # target the host machine - needed for docker
         ollama_host = os.getenv("OLLAMA_HOST", "http://localhost:11434")
         client = Client(host=ollama_host)
-
+        
         response_stream = client.generate(
-            model='qwen2.5:latest',
+            model=model_LLM,
             prompt=user_prompt,
             system=system_instruction,
             stream=True
         )
 
-        print("\n" + "="*30 + " QWEN 2.5 SUMMARY RESPONSE " + "="*30 + "\n")
+        print("\n" + "="*30 + " SUMMARISED RESPONSE " + "="*30 + "\n")
         for chunk in response_stream:
             print(chunk['response'], end='', flush=True)
         print("\n\n" + "="*87)
 
-
     except Exception as e:
         print("\n" + "="*40 + " ACTUAL ERROR CAUGHT " + "="*40)
         print("\nError while sending question and contexts to llm for summary")
-        # This prints just the core error summary message
         print(f"Error Type: {type(e).__name__}")
         print(f"Error Message: {e}")
         print("="*100)
-        
-        
-        with open("llm_error_log.txt", "w") as log_file:
+                
+        with open(logLLM, "w") as log_file:
             traceback.print_exc(file=log_file)
-        print("\n[INFO] Full error log has also been saved to 'llm_error_log.txt'.")
+        print(F"\n[INFO] Full error log has also been saved to {logLLM}.")
 
