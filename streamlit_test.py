@@ -1,6 +1,7 @@
 # run from terminal * streamlit run streamlit_test.py *
 
 import streamlit as st
+import appNew_streamlit_test as RAGapp
 
 
 st.title("Covid Guidance - RAG LLM")
@@ -15,11 +16,22 @@ def generate_response(input_text):
 with st.form("my_form"):
     text = st.text_area(
         "Enter text:",
-        "Please type your Covid question quidance question, sources for the response include WHO, NHS and CDC sources?",
+        "Please type your Covid question quidance question, sources searched for the response include WHO, NHS and CDC sources?",
     )
     submitted = st.form_submit_button("Submit")
-    # if not openai_api_key.startswith("sk-"):
-    #     st.warning("Please enter your OpenAI API key!", icon="⚠")
+
     if submitted:
         generate_response(text)
-        import appNew as appLLM
+        
+        
+with st.form("my form"):
+    # text = st.text_area(
+    #         "Thanks, click submit to begin downloading of source documents"
+    #     )
+    st.write("Thanks, click submit to begin downloading of source documents")
+    submitted = st.form_submit_button("Submit")
+
+    if submitted:
+        text = RAGapp.main_download_prepare_chunk()
+        st.info(text)
+        
