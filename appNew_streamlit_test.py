@@ -669,7 +669,7 @@ def main_generate_vectors_and_save(all_chunks):
         insert_result = save_embeddings_in_vectorstore (chunk_texts_only, chunk_sources, chunk_ids, embeddings)
         
         if insert_result:
-            return "Success"
+            return "Success", model
     
     except Exception as e:
             print("\n" + "="*40 + " ACTUAL ERROR CAUGHT " + "="*40)
@@ -681,31 +681,18 @@ def main_generate_vectors_and_save(all_chunks):
             with open(logEMBEDDING, "w") as log_file:
                 traceback.print_exc(file=log_file)
             print(f"\n[INFO] Full error log has also been saved to {logEMBEDDING}.") 
-            return "Failure"
-    
- 
-# run this straight away if it's just being run as a script, if not hold back because this script is probably being imported by the UI    
-if __name__ == "__main__":    
-    
-    str_Progress, all_chunks = main_download_prepare_chunk()
-    
-    str_Progress = main_generate_vectors_and_save(all_chunks)   
-            
-    #################################################################################################
-    #
-    #       Our Data download, chunking, embedding creation, vector store saving is complete
-    #
-    #################################################################################################
+            return "Failure", None
+        
+        
+def main_search_embeddings(user_question, model, search_limit=5):
     try: 
         #pass
         
         print("\n" + "="*30)
         print("\nAbout the transform user question into vector, search vector store, and build contexts")
         #print("\n" + "="*30)
-        
-        # Define a sample search question
-        user_question = "What are the primary safety guidelines regarding Covid?"
-        print (f"User question, seeking information for: {user_question}\n")
+              
+        print (f"** User question, seeking information for: {user_question} ***\n")
         #print("\n" + "="*30)
 
         # Vectorize the question using the same transformer model
@@ -718,7 +705,7 @@ if __name__ == "__main__":
         search_results = milvus_client.search(
             collection_name=RAG_collection_name,
             data=[query_vector],
-            limit=VECTOR_SEARCH_LIMIT,                  # Retrieve the top closest matching chunks
+            limit=search_limit,                         # Retrieve the top closest matching chunks
             output_fields=["source","text","id"]        # Ask Milvus to return the original text and it's source
         )
                                
@@ -750,6 +737,7 @@ if __name__ == "__main__":
         #print("\n" + "="*30)
         print("\nVectors searched and context built")
         #print("\n" + "="*30)
+        return "Success", combined_context
         
     except Exception as e:
         print("\n" + "="*40 + " ACTUAL ERROR CAUGHT " + "="*40)
@@ -761,6 +749,27 @@ if __name__ == "__main__":
         with open(logVECTOR, "w") as log_file:
             traceback.print_exc(file=log_file)
         print(f"\n[INFO] Full error log has also been saved to {logVECTOR}.")
+        return "Failure", None
+        
+            
+ 
+# run this straight away if it's just being run as a script, if not hold back because this script is probably being imported by the UI    
+if __name__ == "__main__":    
+    
+    str_Progress, all_chunks = main_download_prepare_chunk()
+    
+    str_Progress, transformer_Model = main_generate_vectors_and_save(all_chunks)   
+            
+    #################################################################################################
+    #
+    #       Our Data download, chunking, embedding creation, vector store saving is complete
+    #
+    #################################################################################################
+    
+    user_question = "What are the primary safety guidelines regarding Covid?"
+    combined_context = None
+    str_Progress, combined_context = main_search_embeddings(user_question, transformer_Model, VECTOR_SEARCH_LIMIT)
+    
   
     try:
         
