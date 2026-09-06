@@ -1,5 +1,8 @@
 ﻿README.txt
 
+6th September 2026 -- amendment -- 
+To run this script locally, will also require your own version of ollama to provide the final LLM summary. 
+
 6th September 2026
 UI finally added, only appNew.py is required for running the application. No other files. If you are copying this file locally, then the command variable needs to be set according to your preferred storage location, example would be 
 export DATA_ROOT_DIR="/home/your_username/Downloads/yourfolder". Then pip install the required packages and then run using: python appNew.py 
