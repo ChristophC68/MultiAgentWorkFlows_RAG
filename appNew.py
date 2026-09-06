@@ -1,3 +1,11 @@
+# python -m streamlit run streamlit_test.py [--DATA_ROOT_DIR="/home/christopher/Downloads/Databricks"]
+
+# 3 september install: python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+
+# https://docs.streamlit.io/get-started/fundamentals/main-concepts
+# streamlit run streamlit_test.py [--DATA_ROOT_DIR="/home/christopher/Downloads/Databricks"]
+
+
 ### 31st of August update to Milvus Lite
 # pip install --upgrade pymilvus milvus-lite
 
@@ -63,6 +71,14 @@ from pymilvus import MilvusClient, DataType
 import ollama
 import time
 
+import threading
+import multiprocessing
+import queue
+import gradio as gr
+
+
+BOOL_INCLUDE_YIELD = True # need this to only be true if this is being called as a module from the UI  
+
 # logging files
 #logSPARK="error_log_SPARK.txt"
 logMILVUS = "error_log_MILVUS.txt"
@@ -74,11 +90,14 @@ logEMBEDDING = "error_logEMBEDDING"
 chunk_size=20
 overlap = 10
 embedding_dim = 768
-collection_name = "covid_medical_rag_docs"
+RAG_collection_name = "covid_medical_rag_docs"
 
 saveFormat = "parquet"
 
 VECTOR_SEARCH_LIMIT = 5
+
+# 'all-MiniLM-L6-v2' generates 384-dimensional vectors, but only a maximum context length of 512 tokens.
+str_SentenceTransformer = 'BAAI/bge-base-en-v1.5'
 
 model_LLM ='qwen2.5:latest'
 
@@ -86,6 +105,69 @@ instructionPrompt= ("You are a helpful medical data assistant. Your job is to su
                     "the provided context documents into a single, comprehensive, cohesive answer. "
                     "Only use facts directly mentioned in the context. Do not make up information." )
 
+# dbfs_dir = "/dbfs/FileStore/rag_docs" # use in Databricks platform
+    # dbfs_dir = "/run/media/christopher/external/FileStore/Databricks/rag_docs" # use on external drive
+
+# print ("\nSetting the following paths")
+
+# Use an environment variable, but fallback to '/data' inside the container
+DATA_ROOT = Path(os.getenv("DATA_ROOT_DIR", "/data"))
+
+# Build subdirectories dynamically
+dbfs_dir = DATA_ROOT / "rag_docs"                               #Path("~/Downloads/Databricks/rag_docs").expanduser()
+# print (f"dbfs_dir direcotory:{dbfs_dir}")
+
+pathRagChunks = DATA_ROOT / "rag_docs" / "tmp" /  "rag_chunks"  #"~/Downloads/Databricks/rag_docs/tmp/rag_chunks"
+# print (f"pathRagChunks:      {pathRagChunks}")
+
+milvus_path= DATA_ROOT / "rag_docs" / "local_milvus.db"     #"~/Downloads/Databricks/rag_docs/local_milvus.db"
+# print (f"mulvus_path:        {milvus_path}")
+
+# Create directories if they doesn't exist
+os.makedirs(dbfs_dir, exist_ok=True)  
+os.makedirs(pathRagChunks, exist_ok=True)
+
+str_milvus_path = str(milvus_path)  # milvus will need a string of the path
+strPath = str(pathRagChunks)        # spark also needs a string path
+
+# # Configure standard production logging to see output inside Docker logs
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# temporary comment as streamlit can't find it
+class MilvusLiteLogFilter(logging.Filter):
+    
+    def filter(self, record):
+        # Catch and silence the benign Milvus Lite AllocTimestamp noise
+        if "Exception calling application: Method not implemented!" in record.getMessage():
+            if record.exc_info:
+                exc_text = "".join(traceback.format_exception(*record.exc_info))
+                if "AllocTimestamp" in exc_text:
+                    return False  # Do not log this record
+        return True
+
+# Apply the filter to the gRPC server logger
+grpc_logger = logging.getLogger("grpc._server")
+grpc_logger.addFilter(MilvusLiteLogFilter())
+
+# surpress hardware support warning messages
+logging.getLogger("faiss.loader").setLevel(logging.WARNING) 
+logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
+
+# Silence HTTP request logs from networking libraries
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+
+documents = {
+        "cdc_guidelines.pdf": "https://www.cdc.gov/covid/downloads/hcp/interim-clinical-considerations.pdf",
+        "who_guidelines.pdf": "https://www.ncbi.nlm.nih.gov/books/NBK582435/pdf/Bookshelf_NBK582435.pdf",
+        "nhs_guidelines.pdf": "https://hscscotland.scot/couch/uploads/file/covid19/1_covid-19-guidance-for-social-or-community-care-and-residential-settings.pdf"
+    }
+    
+# documents = {
+#         "cdc_guidelines.pdf": "https://www.cdc.gov/covid/downloads/hcp/interim-clinical-considerations.pdf"
+# }
+    
 
 # Define chunking logic with overlap
 def chunk_text(text, chunk_size=200, overlap=50):
@@ -221,7 +303,7 @@ def extract_pdf_text(pdf_path):
             #     )
 
         print(f"RAW extracted characters: {len(full_text)}")
-
+        
         cleaned_text = clean_text(full_text)
 
         print(f"CLEANED characters: {len(cleaned_text)}")
@@ -472,20 +554,26 @@ def start_Milvus(collection_name, str_milvus_path, embedding_dim):
 
 
 
-def generate_embeddings(texts_list, model):
+def generate_embeddings(texts_list, msg_Q):
     try:
     
         # Generate the Vector Embeddings
         print("\n" + "="*30)
         print("Generating text embeddings (this may take a moment)...")
         
+        # Initialize the local Embedding Model 
+        print("\nInitializing sentence-transformers model...")
+        # msg_Q.put("Initializing sentence-transformers model...")
+        
+        # Force the Hugging Face transformer model to run strictly on CPU, GPU too small
+        model = SentenceTransformer(str_SentenceTransformer, device='cpu')
         embeddings = model.encode(texts_list, show_progress_bar=True)
         
         print("...text embeddings generated.")
         return embeddings
     
     except Exception as e:
-        print("\n" + "="*40 + " In save_Chunks_To_Disk - ACTUAL ERROR CAUGHT " + "="*40)
+        print("\n" + "="*40 + " In generate_embeddings - ACTUAL ERROR CAUGHT " + "="*40)
         print(f"Error Type: {type(e).__name__}")
         print(f"Error Message: {e}")
         print("="*100)
@@ -500,7 +588,7 @@ def save_embeddings_in_vectorstore(chunk_texts_only, chunk_sources, chunk_ids, e
         
         # Warm up Milvus - using helper start_Milvus
         milvus_client = None
-        milvus_client = start_Milvus(collection_name, str_milvus_path, embedding_dim)
+        milvus_client = start_Milvus(RAG_collection_name, str_milvus_path, embedding_dim)
         
               
         # Prepare and Insert Data
@@ -527,7 +615,7 @@ def save_embeddings_in_vectorstore(chunk_texts_only, chunk_sources, chunk_ids, e
         # print(len(data_to_insert[0]["vector"]))
         print(".....  inserting into Milvus Lite...")
         
-        insert_result = milvus_client.insert(collection_name=collection_name, data=data_to_insert)
+        insert_result = milvus_client.insert(collection_name=RAG_collection_name, data=data_to_insert)
     
         print(f"\nPipeline complete! Successfully inserted all records into Milvus Lite.")
         #print("\n" + "="*30)
@@ -542,78 +630,10 @@ def save_embeddings_in_vectorstore(chunk_texts_only, chunk_sources, chunk_ids, e
         
         return False
 
-
-
-class MilvusLiteLogFilter(logging.Filter):
-    def filter(self, record):
-        # Catch and silence the benign Milvus Lite AllocTimestamp noise
-        if "Exception calling application: Method not implemented!" in record.getMessage():
-            if record.exc_info:
-                exc_text = "".join(traceback.format_exception(*record.exc_info))
-                if "AllocTimestamp" in exc_text:
-                    return False  # Do not log this record
-        return True
     
- 
-# run this straight away if it's just being run as a script, if not hold back because this script is probably being imported by the UI    
-if __name__ == "__main__":    
-    
-    # dbfs_dir = "/dbfs/FileStore/rag_docs" # use in Databricks platform
-    # dbfs_dir = "/run/media/christopher/external/FileStore/Databricks/rag_docs" # use on external drive
-
-    print ("\nSetting the following paths")
-
-    # Use an environment variable, but fallback to '/data' inside the container
-    DATA_ROOT = Path(os.getenv("DATA_ROOT_DIR", "/data"))
-
-    # Build subdirectories dynamically
-    dbfs_dir = DATA_ROOT / "rag_docs"                               #Path("~/Downloads/Databricks/rag_docs").expanduser()
-    print (f"dbfs_dir direcotory:{dbfs_dir}")
-
-    pathRagChunks = DATA_ROOT / "rag_docs" / "tmp" /  "rag_chunks"  #"~/Downloads/Databricks/rag_docs/tmp/rag_chunks"
-    print (f"pathRagChunks:      {pathRagChunks}")
-
-    milvus_path= DATA_ROOT / "rag_docs" / "local_milvus.db"     #"~/Downloads/Databricks/rag_docs/local_milvus.db"
-    print (f"mulvus_path:        {milvus_path}")
-
-    # Create directories if they doesn't exist
-    os.makedirs(dbfs_dir, exist_ok=True)  
-    os.makedirs(pathRagChunks, exist_ok=True)
-   
-    str_milvus_path = str(milvus_path)  # milvus will need a string of the path
-    strPath = str(pathRagChunks)        # spark also needs a string path
-    
-    # # Configure standard production logging to see output inside Docker logs
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-    logger = logging.getLogger(__name__)
-
-    # Apply the filter to the gRPC server logger
-    grpc_logger = logging.getLogger("grpc._server")
-    grpc_logger.addFilter(MilvusLiteLogFilter())
-    
-    # surpress hardware support warning messages
-    logging.getLogger("faiss.loader").setLevel(logging.WARNING) 
-    logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
-    
-    # Silence HTTP request logs from networking libraries
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("urllib3").setLevel(logging.WARNING)
-    
-    
-
-
-    documents = {
-        "cdc_guidelines.pdf": "https://www.cdc.gov/covid/downloads/hcp/interim-clinical-considerations.pdf",
-        "who_guidelines.pdf": "https://www.ncbi.nlm.nih.gov/books/NBK582435/pdf/Bookshelf_NBK582435.pdf",
-        "nhs_guidelines.pdf": "https://hscscotland.scot/couch/uploads/file/covid19/1_covid-19-guidance-for-social-or-community-care-and-residential-settings.pdf"
-    }
-    
-    # documents = {
-    #         "cdc_guidelines.pdf": "https://www.cdc.gov/covid/downloads/hcp/interim-clinical-considerations.pdf"
-    # }
-    
-    try:
-                
+def main_download_prepare_chunk():
+    try:  
+        
         print("\n" + "="*30)
         print("\nDownloading and cleaning all docs")
         print("\n" + "="*30)
@@ -628,8 +648,10 @@ if __name__ == "__main__":
     
         # ALL_CHUNKS IS A LIST OF CHUNKS IN THE FOLLOWING FORM: "source","chunk_id","text"
         all_chunks = do_chunking(documents_to_chunk, chunk_size, overlap)
-            
-        print(f"*** Total chunks created across all documents: {len(all_chunks)} ***\n")     
+               
+        print(f"*** Total chunks created across all documents: {len(all_chunks)} ***\n")
+                      
+        return "Success", all_chunks     
     
     except Exception as e:
         print("\n" + "="*40 + " ACTUAL ERROR CAUGHT " + "="*40)
@@ -640,27 +662,32 @@ if __name__ == "__main__":
                 
         with open(logDOWNLOAD, "w") as log_file:
             traceback.print_exc(file=log_file)
-        print(f"\n[INFO] Full error log has also been saved to {logDOWNLOAD}.")    
-    
+        print(f"\n[INFO] Full error log has also been saved to {logDOWNLOAD}.")  
         
+        return "Failure", []
+    
+            
+def main_generate_vectors_and_save(all_chunks, msg_Q=None):      
     try: 
     
         # chunk_texts_only  = save_Chunks_To_Disk(all_chunks, strPath, saveFormat)
         chunk_texts_only, chunk_sources, chunk_ids = save_Chunks_To_Disk(all_chunks, strPath, saveFormat)
-    
-        # Initialize the local Embedding Model 
-        print("\nInitializing sentence-transformers model...")
-        # 'all-MiniLM-L6-v2' generates 384-dimensional vectors, but only a maximum context length of 512 tokens.
-        # Force the Hugging Face transformer model to run strictly on CPU, GPU too small
-        # model = SentenceTransformer('all-MiniLM-L6-v2', device='cpu')
-        model = SentenceTransformer('BAAI/bge-base-en-v1.5', device='cpu')
-        
+         
+        msg_Q.put("Generating embeddings")
         # At the moment we are passing too much into this function, we don't want the chunks_list because it contains more than just text
+        
+        # Force the Hugging Face transformer model to run strictly on CPU, GPU too small
+        model = SentenceTransformer(str_SentenceTransformer, device='cpu')
+        embeddings = None
         embeddings = generate_embeddings(chunk_texts_only, model) # we are deliberately only passing the texts into here
         
         insert_result = False
         # THE EMBEDDINGS NEED TO BE COMBINED WITH THE all_chunks (original text, id and source), and then everything can be added to the collection
+        msg_Q.put("Saving embeddings in Vector store")
         insert_result = save_embeddings_in_vectorstore (chunk_texts_only, chunk_sources, chunk_ids, embeddings)
+        
+        if insert_result:
+            return "Success"
     
     except Exception as e:
             print("\n" + "="*40 + " ACTUAL ERROR CAUGHT " + "="*40)
@@ -672,35 +699,30 @@ if __name__ == "__main__":
             with open(logEMBEDDING, "w") as log_file:
                 traceback.print_exc(file=log_file)
             print(f"\n[INFO] Full error log has also been saved to {logEMBEDDING}.") 
-            
-    #################################################################################################
-    #
-    #       Our Data download, chunking, embedding creation, vector store saving is complete
-    #
-    #################################################################################################
+            return "Failure"
+        
+        
+def main_search_embeddings(user_question, search_limit=5):
     try: 
         #pass
         
         print("\n" + "="*30)
-        print("\nAbout the transform user question into vector, search vector store, and build contexts")
-        #print("\n" + "="*30)
+        print("\nAbout the transform user question into vector, search vector store, and build contexts")            
+        print (f"** User question, seeking information for: {user_question} ***\n")
         
-        # Define a sample search question
-        user_question = "What are the primary safety guidelines regarding Covid?"
-        print (f"User question, seeking information for: {user_question}\n")
-        #print("\n" + "="*30)
-
         # Vectorize the question using the same transformer model
+        # Force the Hugging Face transformer model to run strictly on CPU, GPU too small
+        model = SentenceTransformer(str_SentenceTransformer, device='cpu')
         query_vector = model.encode(user_question).tolist()
-
         # Query local Milvus Lite collection
         print("Connecting to local Milvus Lite to search for relevant chunks...")
-        #print("="*63)
+        
         milvus_client = MilvusClient(str_milvus_path)
+        
         search_results = milvus_client.search(
-            collection_name="covid_medical_rag_docs",
+            collection_name=RAG_collection_name,
             data=[query_vector],
-            limit=VECTOR_SEARCH_LIMIT,                  # Retrieve the top closest matching chunks
+            limit=search_limit,                         # Retrieve the top closest matching chunks
             output_fields=["source","text","id"]        # Ask Milvus to return the original text and it's source
         )
                                
@@ -728,14 +750,12 @@ if __name__ == "__main__":
         #       Searching Vectors for answer to question complete, so context are available for LLM
         #
         #################################################################################################
-        
-        #print("\n" + "="*30)
+        # msg_Q.put("Vectors searched and context built")
         print("\nVectors searched and context built")
-        #print("\n" + "="*30)
+        return "Success", combined_context
         
     except Exception as e:
-        print("\n" + "="*40 + " ACTUAL ERROR CAUGHT " + "="*40)
-        print("\nError processing chunks into vectors")
+        print("\n" + "="*40 + "Error main_search_embeddings - ACTUAL ERROR CAUGHT " + "="*40)
         print(f"Error Type: {type(e).__name__}")
         print(f"Error Message: {e}")
         print("="*100)
@@ -743,7 +763,9 @@ if __name__ == "__main__":
         with open(logVECTOR, "w") as log_file:
             traceback.print_exc(file=log_file)
         print(f"\n[INFO] Full error log has also been saved to {logVECTOR}.")
-  
+        return "Failure", None
+        
+def main_summarise_reply(context, user_question):
     try:
         
         # Build a structured prompt context window
@@ -758,7 +780,7 @@ if __name__ == "__main__":
 
         ---
         RETRIEVED CONTEXT DOCUMENTS:
-        {combined_context}
+        {context}
         ---
 
         # Consolidated Summary:"""
@@ -778,9 +800,16 @@ if __name__ == "__main__":
         )
 
         print("\n" + "="*30 + " SUMMARISED RESPONSE " + "="*30 + "\n")
+        
+        strAnswer = ""
         for chunk in response_stream:
+            strAnswer = strAnswer + chunk['response']
             print(chunk['response'], end='', flush=True)
+            
+            
         print("\n\n" + "="*87)
+        print(f"\nHere is the answer repeated:{strAnswer}\n")
+        return "Success", strAnswer
 
     except Exception as e:
         print("\n" + "="*40 + " ACTUAL ERROR CAUGHT " + "="*40)
@@ -791,5 +820,184 @@ if __name__ == "__main__":
                 
         with open(logLLM, "w") as log_file:
             traceback.print_exc(file=log_file)
-        print(F"\n[INFO] Full error log has also been saved to {logLLM}.")
+        print(F"\n[INFO] Full error log has also been saved to {logLLM}.")   
+        return "Failure", strAnswer     
+    
+    
+ 
+# run this straight away if it's just being run as a script, if not hold back because this script is probably being imported by the UI 
+def all_main_pipeline(msg_queue=None):
+
+    """
+    Actual main routine in its own thread. 
+    Sends updates to UI via a Queue.
+    """
+    try:
+        print("In main routine")
+        all_chunks = []       
+        str_Progress = ""
+        
+        status_msg = "Downloading reference PDFs"
+        if msg_queue:
+            msg_queue.put(status_msg)  # Send to Q
+        else:
+            print(f"[Standalone]: {status_msg}")  # Standalone fallback
+        
+        
+        str_Progress, all_chunks = main_download_prepare_chunk()
+        
+        status_msg = "Generating Embedding Chunks, saving as Vectors"
+        if msg_queue:
+            msg_queue.put(status_msg)  # Send to Q
+        else:
+            print(f"[Standalone]: {status_msg}")  # Standalone fallback
+                                
+        str_Progress = main_generate_vectors_and_save(all_chunks, msg_queue) 
+        
+        status_msg = "Searching Vectors to answer user question"
+        if msg_queue:
+            msg_queue.put(status_msg)  # Send to Q
+        else:
+            print(f"[Standalone]: {status_msg}")  # Standalone fallback  
+         
+        
+   
+    except Exception as e:
+        msg_queue.put(f"ERROR: {str(e)}")
+        print("\n" + "="*40 + " In all_main_pipeline ACTUAL ERROR CAUGHT " + "="*40)
+        print(f"Error Type: {type(e).__name__}")
+        print(f"Error Message: {e}")
+        print("="*100)
+                
+        with open(logLLM, "w") as log_file:
+            traceback.print_exc(file=log_file)
+        print(F"\n[INFO] Full error log has also been saved to {logLLM}.")   
+        return "Failure", strAnswer     
+    finally:
+        msg_queue.put(None)
+
+
+def ui_pipeline_wrapper():
+    
+    """Runs the pipeline thread and yields status to the UI."""
+    msg_queue = multiprocessing.Queue()
+    
+    # Spin up an entirely separate OS process for your main routine
+    process = multiprocessing.Process(target=all_main_pipeline, args=(msg_queue,))
+    process.start()
+    
+    # # Run pipeline in a concurrent thread
+    # thread = threading.Thread(target=all_main_pipeline, args=(msg_queue,))
+    # thread.start()
+    
+    final_result = ""
+    while True:
+        try:
+            msg = msg_queue.get(timeout=0.1)
+            if msg is None:
+                break
+            final_result = msg
+            yield msg, gr.update(visible=False), gr.update(visible=False) # Keep LLM section hidden while running
+        except queue.Empty:
+            continue
+            
+    # PIPELINE FINISHED:
+    # must be a yield rather than a return because the first use of yield in the while statement, turns this whole function into a generator. 
+    yield f"Pipeline Complete!", final_result, gr.update(visible=True) 
+    
+    
+
+def main_query_llm(pipeline_context, user_question):
+    
+    # user_question = "What are the primary safety guidelines regarding Covid-19?"
+    combined_context = None
+    str_Progress, combined_context = main_search_embeddings(user_question, VECTOR_SEARCH_LIMIT)
+    
+    # status_msg = "Sending contexts and user question to LLM for summary"
+    # if msg_queue:
+    #     msg_queue.put(status_msg)  # Send to Q
+    # else:
+    #     print(f"[Standalone]: {status_msg}")  # Standalone fallback  
+            
+    final_summary_answer = ""
+    str_Progress, final_summary_answer = main_summarise_reply(combined_context, user_question) 
+           
+    return f"{final_summary_answer}"    
+
+
+
+
+# https://gradio.app/docs/gradio/group
+    # with gr.Group():
+    #     gr.Textbox(label="First")
+    #     gr.Textbox(label="Last")
+        
+with gr.Blocks() as demo:
+    gr.Markdown("Data Pipeline & LLM Query Interface")
+
+    # This hidden component stores data behind the scenes across multiple user queries
+    pipeline_state = gr.State()
+            
+    # THE PIPELINE (Runs Once) ---
+    with gr.Group():
+        gr.Markdown("Start here: Build Data Pipeline")
+        pipeline_status = gr.Textbox(label="Pipeline Status", value="Ready to process data.")
+        run_pipeline_btn = gr.Button("Run Pipeline Once", variant="primary")
+        
+    # --- LLM QUERY (Hidden until Pipeline finishes) ---
+    with gr.Group(visible=False) as llm_section:
+        gr.Markdown("Ask the LLM about Covid-19 guidelines")
+        user_query_input = gr.Textbox(label="Your Query", placeholder="Ask something about the processed data...")
+        llm_output = gr.Textbox(label="LLM Response")
+        submit_query_btn = gr.Button("Ask LLM", variant="secondary")
+
+    # --- UI INTERACTION LOGIC ---
+    
+    # 1. Clicking the pipeline button updates the status box, saves data to state, and reveals the LLM section
+    run_pipeline_btn.click(
+        fn=ui_pipeline_wrapper, 
+        outputs=[pipeline_status, pipeline_state, llm_section]
+    )
+    
+    # 2. Clicking the query button reads from the saved state and the textbox, outputting only to the LLM response box
+    submit_query_btn.click(
+        fn=main_query_llm,
+        inputs=[pipeline_state, user_query_input],
+        outputs=llm_output
+    )
+
+
+if __name__ == "__main__":
+             
+    demo.launch()
+
+            
+    # if __name__ == "__main__":  
+            
+    #     # toggle between UI mode and Standalone mode
+    #     RUN_AS_UI = True 
+    #     # RUN_AS_UI = False
+        
+    #     if RUN_AS_UI:
+    #         import gradio as gr
+            
+    #         with gr.Blocks() as demo:
+    #             gr.Markdown("### Multi-Threaded Gradio Engine")
+    #             output_box = gr.Textbox(label="RAG Pipeline Build Status", value="Ready.")
+    #             start_btn = gr.Button("Run Pipeline")
+                
+    #             # Gradio automatically handles the 'yield' from ui_wrapper to stream text
+    #             start_btn.click(fn=ui_wrapper, outputs=output_box)
+                
+    #         demo.launch()
+    #     else:
+    #         # Run standard standalone mode directly in the terminal
+    #         all_main()
+        
+    
+        
+        
+
+        
+
 
