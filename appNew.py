@@ -1,9 +1,9 @@
+# 07. Sept. 2026 - pip install mlflow
+    # run everytime a new terminal with 'mlflow server'
+
 # python -m streamlit run streamlit_test.py [--DATA_ROOT_DIR="/home/christopher/Downloads/Databricks"]
 
 # 3 september install: python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-
-# https://docs.streamlit.io/get-started/fundamentals/main-concepts
-# streamlit run streamlit_test.py [--DATA_ROOT_DIR="/home/christopher/Downloads/Databricks"]
 
 
 ### 31st of August update to Milvus Lite
@@ -69,15 +69,25 @@ from nltk.tokenize import sent_tokenize
 from sentence_transformers import SentenceTransformer
 from pymilvus import MilvusClient, DataType
 import ollama
+
+from openai import OpenAI
+ 
+from ollama import Client
 import time
 
 import threading
 import multiprocessing
 import queue
 import gradio as gr
+import mlflow
+import mlflow.system_metrics
+import openai
 
+MLFLOW_TRACKING_URI = "http://127.0.0.1:5000"
+OLLAMA_BASE_URL = "http://localhost:11434/v1"
 
 BOOL_INCLUDE_YIELD = True # need this to only be true if this is being called as a module from the UI  
+
 
 # logging files
 #logSPARK="error_log_SPARK.txt"
@@ -106,7 +116,7 @@ instructionPrompt= ("You are a helpful medical data assistant. Your job is to su
                     "Only use facts directly mentioned in the context. Do not make up information." )
 
 # dbfs_dir = "/dbfs/FileStore/rag_docs" # use in Databricks platform
-    # dbfs_dir = "/run/media/christopher/external/FileStore/Databricks/rag_docs" # use on external drive
+# dbfs_dir = "/run/media/christopher/external/FileStore/Databricks/rag_docs" # use on external drive
 
 # print ("\nSetting the following paths")
 
@@ -158,16 +168,35 @@ logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("urllib3").setLevel(logging.WARNING)
 
-documents = {
+# Tells the library to only look at your local cache folder
+os.environ["HF_HUB_OFFLINE"] = "1"
+
+# deal with Hugging Face Hub warnings - we are working locally so they are irrelevant.
+os.environ["HF_HUB_VERBOSITY"] = "error"
+
+# Force MLflow to log traces synchronously before the script exits
+os.environ["MLFLOW_ENABLE_ASYNC_TRACE_LOGGING"] = "false"
+
+# Possible Document dictionaries for pipeline
+documents_covid = {
         "cdc_guidelines.pdf": "https://www.cdc.gov/covid/downloads/hcp/interim-clinical-considerations.pdf",
         "who_guidelines.pdf": "https://www.ncbi.nlm.nih.gov/books/NBK582435/pdf/Bookshelf_NBK582435.pdf",
         "nhs_guidelines.pdf": "https://hscscotland.scot/couch/uploads/file/covid19/1_covid-19-guidance-for-social-or-community-care-and-residential-settings.pdf"
     }
-    
-# documents = {
-#         "cdc_guidelines.pdf": "https://www.cdc.gov/covid/downloads/hcp/interim-clinical-considerations.pdf"
-# }
-    
+
+documents_skincare = {
+        "Skin_care_101.pdf": "https://cdn-links.lww.com/permalink/ijwd/a/ijwd_1_1_2023_07_10_kimball_ijwd-d-22-00059_sdc0.pdf",
+        "Colleges_of_Nursing.pdf": "https://www.aacnnursing.org/Portals/0/PDFs/Publications/Essentials-2026.pdf",
+        "Oxford_Health_Trust.pdf": "https://www.oxfordhealth.nhs.uk/wp-content/uploads/sites/51/2025/09/2.-The-Skin.pdf"
+    }
+
+documents_elderlycare = {
+        "Nice_org.pdf": "https://www.nice.org.uk/guidance/ng22/evidence/full-guideline-pdf-552742669"
+    }
+
+
+Global_documents = documents_elderlycare # this can be changed by the user
+   
 
 # Define chunking logic with overlap
 def chunk_text(text, chunk_size=200, overlap=50):
@@ -316,7 +345,7 @@ def extract_pdf_text(pdf_path):
         return " "
     
   
-def download_and_prepare(documents):
+def download_and_prepare():
     """_summary_
 
     Args:
@@ -328,7 +357,7 @@ def download_and_prepare(documents):
         documents_to_chunk = []
         
         # Download each pdf
-        for filename, url in documents.items():
+        for filename, url in Global_documents.items():
             print(f"\ndownload file: {filename}...")
             # response = requests.get(url)
             response = requests.get(url, timeout=30)
@@ -629,6 +658,86 @@ def save_embeddings_in_vectorstore(chunk_texts_only, chunk_sources, chunk_ids, e
         print("="*100)
         
         return False
+    
+def experimentRun(system_instruction: str, user_prompt: str, experiment_Name = "Medical_RAG") -> bool:
+    
+    try:
+        
+        print(f"in experiementRun\n. System_instruction:{system_instruction}\n")
+        print(f"in experiementRun. User_prompt:{user_prompt}\n")
+        # 1. Instantiate a client                    
+        # target the host machine - needed for docker
+        ollama_host = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+        client = Client(host=ollama_host)
+        
+        # Invoke the model inside an MLflow run
+        with mlflow.start_run(run_name = experiment_Name):
+            response_stream = client.generate(
+                model=model_LLM,
+                prompt=user_prompt,
+                system=system_instruction,
+                stream=True
+            )
+
+        #     print("\n" + "="*30 + " SUMMARISED RESPONSE " + "="*30 + "\n")
+        
+            strAnswer = ""
+            for chunk in response_stream:
+                strAnswer = strAnswer + chunk['response']
+                print(chunk['response'], end='', flush=True)
+            
+            
+            print("\n\n" + "="*87)
+            print(f"\nHere is the answer repeated:{strAnswer}\n")
+                           
+            # let's get the trace details for the experiment
+            try:
+                trace_id = mlflow.get_last_active_trace_id() # Retrieve the trace ID generated automatically by OpenAI autolog
+                        
+                # 7. Retrieve the complete trace object from the backend
+                if trace_id:
+                    pass
+                    print("\n\nTrace ID Successfully Captured:", trace_id)
+                    time.sleep(1.5) # Add a pause to give the background logger time to flush the data
+                    trace = mlflow.get_trace(trace_id)
+                    print("Trace Object Details:", trace)
+                    
+        #             status = getattr(trace.info, "state", "UNKNOWN")
+                    
+        #             # Extract latency metrics 
+        #             latency_ms = getattr(trace.info, "execution_duration", 0)
+        #             latency_sec = latency_ms / 1000 if latency_ms else 0
+                    
+        #             promptTokens = getattr(trace.info, "prompt_tokens", 0) # this never works!!
+                    
+        #             # C. Extract the model name from the root span attributes
+        #             root_span = trace.data.spans[0] 
+        #             model_name = root_span.attributes.get("model", "Unknown Model")
+                            
+        #             # 3. Print out metrics
+        #             #print(f"\n[Trace ID]: {trace_id}")
+        #             print(f" Model Involved: {model_name}")
+        #             print(f" Status: {status}")
+        #             print(f" Total Latency: {latency_ms} ms ({latency_sec:.2f} seconds)")
+        #             print(f" Prompt token count: {promptTokens}\n")
+                else:
+                    print("\nNo active trace ID recorded by autologger.")    
+            
+                                      
+            except Exception as e:
+                print("\n" + "="*40 + " Error in collecting Trace Info ACTUAL ERROR CAUGHT " + "="*40)
+                print(f"Error Type: {type(e).__name__}")
+                print(f"Error Message: {e}")
+                return False #, ""  
+                
+        return True, strAnswer    # if we got this far, everything went OK
+         
+    except Exception as e:
+        print("\n" + "="*40 + " Error in experimentRun ACTUAL ERROR CAUGHT " + "="*40)
+        print(f"Error Type: {type(e).__name__}")
+        print(f"Error Message: {e}")
+        print("="*100)
+        return False, ""
 
     
 def main_download_prepare_chunk():
@@ -640,7 +749,7 @@ def main_download_prepare_chunk():
         
         # BRINGS BACK A LIST OF DOCUMENTS WITH SOURCES 
         documents_to_chunk = []   
-        documents_to_chunk = download_and_prepare(documents)
+        documents_to_chunk = download_and_prepare()
         
         print("\n" + "="*30) 
         print("\nChunking all Docs")  
@@ -673,7 +782,7 @@ def main_generate_vectors_and_save(all_chunks, msg_Q=None):
         # chunk_texts_only  = save_Chunks_To_Disk(all_chunks, strPath, saveFormat)
         chunk_texts_only, chunk_sources, chunk_ids = save_Chunks_To_Disk(all_chunks, strPath, saveFormat)
          
-        msg_Q.put("Generating embeddings")
+        msg_Q.put("Generating embeddings....this could take a couple of minutes.")
         # At the moment we are passing too much into this function, we don't want the chunks_list because it contains more than just text
         
         # Force the Hugging Face transformer model to run strictly on CPU, GPU too small
@@ -745,11 +854,10 @@ def main_search_embeddings(user_question, search_limit=5):
         # Join the context blocks with clear dividers
         combined_context = "\n\n---\n\n".join(retrieved_contexts)
                 
-        #################################################################################################
         #
         #       Searching Vectors for answer to question complete, so context are available for LLM
         #
-        #################################################################################################
+        
         # msg_Q.put("Vectors searched and context built")
         print("\nVectors searched and context built")
         return "Success", combined_context
@@ -764,53 +872,34 @@ def main_search_embeddings(user_question, search_limit=5):
             traceback.print_exc(file=log_file)
         print(f"\n[INFO] Full error log has also been saved to {logVECTOR}.")
         return "Failure", None
+    
+    
         
 def main_summarise_reply(context, user_question):
     try:
+        os.environ["MLFLOW_ENABLE_ASYNC_TRACE_LOGGING"] = "false" # Force MLflow to log traces synchronously before the script exits
+        ollama_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1") # Read from the environment variable ("OLLAMA_BASE_URL" will exist in the Docker gateway), or fall back to localhost if it doesn't exist
         
-        # Build a structured prompt context window
-        # system_instruction = (
-        #     "You are a helpful medical data assistant. Your job is to summarize "
-        #     "the provided context documents into a single, comprehensive, cohesive answer. "
-        #     "Only use facts directly mentioned in the context. Do not make up information."
-        # )
-        system_instruction = instructionPrompt
+        # MLFlow tracking configurations
+        # This automatically detects the Docker environment variable or falls back to local
+        tracking_uri = os.getenv("MLFLOW_TRACKING_URI", "http://127.0.0.1:5000")
+        mlflow.set_tracking_uri(tracking_uri)
+                       
+        system_instruction_uri = "MultiAgentWorkFlow_Instruction_Prompt"
+                 
+        user_prompt_uri = "MultiAgentWorkFlow_User_Prompt" 
+                          
+        mlflow.openai.autolog() # 2. Enable MLflow autologging for OpenAI client   
         
-        user_prompt = f"""Based on the following retrieved reference documents, please write a single consolidated summary answering this question: '{user_question}'
-
-        ---
-        RETRIEVED CONTEXT DOCUMENTS:
-        {context}
-        ---
-
-        # Consolidated Summary:"""
-
-        # 1. Instantiate a client 
-        from ollama import Client
+        system_instructions_template = mlflow.genai.load_prompt (system_instruction_uri)
+        system_instructions = system_instructions_template.format()
         
-        # target the host machine - needed for docker
-        ollama_host = os.getenv("OLLAMA_HOST", "http://localhost:11434")
-        client = Client(host=ollama_host)
-        
-        response_stream = client.generate(
-            model=model_LLM,
-            prompt=user_prompt,
-            system=system_instruction,
-            stream=True
-        )
-
-        print("\n" + "="*30 + " SUMMARISED RESPONSE " + "="*30 + "\n")
-        
-        strAnswer = ""
-        for chunk in response_stream:
-            strAnswer = strAnswer + chunk['response']
-            print(chunk['response'], end='', flush=True)
-            
-            
-        print("\n\n" + "="*87)
-        print(f"\nHere is the answer repeated:{strAnswer}\n")
-        return "Success", strAnswer
-
+        user_prompt_template = mlflow.genai.load_prompt (user_prompt_uri)
+        variables = {"user_question": user_question, "context": context}
+        user_prompt = user_prompt_template.format(**variables)
+       
+        boolRes, strAnswer = experimentRun(system_instructions, user_prompt) # this will capture the call and results
+        return boolRes, strAnswer
     except Exception as e:
         print("\n" + "="*40 + " ACTUAL ERROR CAUGHT " + "="*40)
         print("\nError while sending question and contexts to llm for summary")
@@ -826,14 +915,13 @@ def main_summarise_reply(context, user_question):
     
  
 # run this straight away if it's just being run as a script, if not hold back because this script is probably being imported by the UI 
-def all_main_pipeline(msg_queue=None):
+def all_main_pipeline(msg_queue=None, selection_x=None):
 
     """
     Actual main routine in its own thread. 
     Sends updates to UI via a Queue.
-    """
-    try:
-        print("In main routine")
+    """  
+    try:    
         all_chunks = []       
         str_Progress = ""
         
@@ -845,7 +933,7 @@ def all_main_pipeline(msg_queue=None):
         
         
         str_Progress, all_chunks = main_download_prepare_chunk()
-        
+                
         status_msg = "Generating Embedding Chunks, saving as Vectors"
         if msg_queue:
             msg_queue.put(status_msg)  # Send to Q
@@ -859,8 +947,7 @@ def all_main_pipeline(msg_queue=None):
             msg_queue.put(status_msg)  # Send to Q
         else:
             print(f"[Standalone]: {status_msg}")  # Standalone fallback  
-         
-        
+   
    
     except Exception as e:
         msg_queue.put(f"ERROR: {str(e)}")
@@ -882,6 +969,8 @@ def ui_pipeline_wrapper():
     """Runs the pipeline thread and yields status to the UI."""
     msg_queue = multiprocessing.Queue()
     
+    # selection_x = "Skin Care"
+     
     # Spin up an entirely separate OS process for your main routine
     process = multiprocessing.Process(target=all_main_pipeline, args=(msg_queue,))
     process.start()
@@ -924,7 +1013,27 @@ def main_query_llm(pipeline_context, user_question):
            
     return f"{final_summary_answer}"    
 
-
+def ui_theme_change(selection_x):
+    
+    print(f"In ui_theme_change, selection: {selection_x}")
+    
+    global Global_documents
+      
+    # Match the day to predefined patterns
+    match selection_x:
+        case "Skin Care":
+            Global_documents = documents_skincare
+        case "Covid-19":
+            Global_documents = documents_covid
+        case "Care for the Elderly":
+            Global_documents = documents_elderlycare
+        case _:
+            print("Theme Selection NOT GOOD! Swapping to default")  # Default case
+            Global_documents = documents_ederlycare
+   
+    print(f"User selection, first document in dictionary: {Global_documents}") 
+     
+    return f"You selected: {selection_x}"
 
 
 # https://gradio.app/docs/gradio/group
@@ -940,13 +1049,20 @@ with gr.Blocks() as demo:
             
     # THE PIPELINE (Runs Once) ---
     with gr.Group():
-        gr.Markdown("Start here: Build Data Pipeline")
+        gr.Markdown("Start here: Build Data Pipeline: Please choose your pipeline interest:")
+                
+        flavor_dropdown = gr.Dropdown(
+            choices=["Skin Care", "Covid-19", "Care for the Elderly"], 
+            label="Choose a theme",
+            value="Care for the Elderly"  # Default selection
+        )
+        theme_output_text = gr.Textbox(label="Your Selection")
         pipeline_status = gr.Textbox(label="Pipeline Status", value="Ready to process data.")
         run_pipeline_btn = gr.Button("Run Pipeline Once", variant="primary")
         
     # --- LLM QUERY (Hidden until Pipeline finishes) ---
     with gr.Group(visible=False) as llm_section:
-        gr.Markdown("Ask the LLM about Covid-19 guidelines")
+        gr.Markdown("Please ask your question")
         user_query_input = gr.Textbox(label="Your Query", placeholder="Ask something about the processed data...")
         llm_output = gr.Textbox(label="LLM Response")
         submit_query_btn = gr.Button("Ask LLM", variant="secondary")
@@ -964,6 +1080,13 @@ with gr.Blocks() as demo:
         fn=main_query_llm,
         inputs=[pipeline_state, user_query_input],
         outputs=llm_output
+    )
+    
+   
+    flavor_dropdown.change(
+        fn=ui_theme_change, 
+        inputs=flavor_dropdown, 
+        outputs=theme_output_text
     )
 
 

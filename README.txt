@@ -1,5 +1,9 @@
 ﻿README.txt
 
+8th September 2026
+MLFlow added to the code. This is important! :-)
+Drop down box functionality so now there is a choice of 3 different themes for downloading into the pipeline, Covid-19, Skin care, Caring for the elderly.
+
 6th September 2026 -- amendment -- 
 To run this script locally, will also require your own version of ollama to provide the final LLM summary. 
 
