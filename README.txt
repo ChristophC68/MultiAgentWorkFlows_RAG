@@ -1,5 +1,8 @@
 ﻿README.txt
 
+9th September 2026
+MLFlow bugs fixed. Full model request and response available for saving and inspecting along with other interesting parameter. 
+
 8th September 2026
 MLFlow added to the code. This is important! :-)
 Drop down box functionality so now there is a choice of 3 different themes for downloading into the pipeline, Covid-19, Skin care, Caring for the elderly.

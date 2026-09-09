@@ -663,28 +663,64 @@ def experimentRun(system_instruction: str, user_prompt: str, experiment_Name = "
     
     try:
         
-        print(f"in experiementRun\n. System_instruction:{system_instruction}\n")
-        print(f"in experiementRun. User_prompt:{user_prompt}\n")
+        # print(f"in experiementRun\n. System_instruction:{system_instruction}\n")
+        # print(f"in experiementRun. User_prompt:{user_prompt}\n")
+        
         # 1. Instantiate a client                    
         # target the host machine - needed for docker
-        ollama_host = os.getenv("OLLAMA_HOST", "http://localhost:11434")
-        client = Client(host=ollama_host)
+        ollama_host = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
+        
+        # Configure OpenAI client to point to local Ollama server
+        #client = Client(host=ollama_host)
+        client = openai.OpenAI(
+            base_url=ollama_host,
+            api_key="ollama"  # A placeholder string 
+        )
+        
         
         # Invoke the model inside an MLflow run
         with mlflow.start_run(run_name = experiment_Name):
-            response_stream = client.generate(
+            
+            mlflow.log_params({"temperature": "0.5", 
+                    "max_tokens": "1000", 
+                    "latency_ms":True, 
+                    "promptTokens":True, 
+                    "model_type":True, 
+                    "fast_inference":True, 
+                    "completion_tokens":True, 
+                    "prompt_tokens_details":True,
+                    "completion_tokens_details": True, 
+                    "prompt_tokens_details": True,
+                    "moderation": True})
+            
+            
+                                
+            # # Request the completion with stream=True            
+            # response_stream = client.generate( !!! this is the old method
+            #     model=model_LLM,
+            #     prompt=user_prompt,
+            #     system=system_instruction,
+            #     stream=True, 
+            # )
+            # Request the completion with stream=True
+            response_stream = client.chat.completions.create( # this is the official new method
                 model=model_LLM,
-                prompt=user_prompt,
-                system=system_instruction,
-                stream=True
+                messages=[  {"role": "system", "content": system_instruction},
+                            {"role": "user", "content": user_prompt}],
+                stream=True, 
+                stream_options={"include_usage": True},
             )
 
         #     print("\n" + "="*30 + " SUMMARISED RESPONSE " + "="*30 + "\n")
         
             strAnswer = ""
+            #  the returned stream yields objects, not dictionaries like the old method
             for chunk in response_stream:
-                strAnswer = strAnswer + chunk['response']
-                print(chunk['response'], end='', flush=True)
+                if chunk.choices and len(chunk.choices) > 0:
+                    delta = chunk.choices[0].delta.content
+                    if delta: # check against None values
+                        strAnswer += delta
+                        print(delta, end='', flush=True)
             
             
             print("\n\n" + "="*87)
@@ -696,39 +732,41 @@ def experimentRun(system_instruction: str, user_prompt: str, experiment_Name = "
                         
                 # 7. Retrieve the complete trace object from the backend
                 if trace_id:
-                    pass
                     print("\n\nTrace ID Successfully Captured:", trace_id)
                     time.sleep(1.5) # Add a pause to give the background logger time to flush the data
                     trace = mlflow.get_trace(trace_id)
                     print("Trace Object Details:", trace)
                     
-        #             status = getattr(trace.info, "state", "UNKNOWN")
+                    status = getattr(trace.info, "state", "UNKNOWN")
                     
-        #             # Extract latency metrics 
-        #             latency_ms = getattr(trace.info, "execution_duration", 0)
-        #             latency_sec = latency_ms / 1000 if latency_ms else 0
+                    # Extract latency metrics 
+                    latency_ms = getattr(trace.info, "execution_duration", 0)
+                    latency_sec = latency_ms / 1000 if latency_ms else 0
                     
-        #             promptTokens = getattr(trace.info, "prompt_tokens", 0) # this never works!!
+                    # promptTokens = getattr(trace.info, "prompt_tokens", 0) # this never works!!
+                    # completionTokens = getattr(trace.info, "completion_tokens", 0)
                     
-        #             # C. Extract the model name from the root span attributes
-        #             root_span = trace.data.spans[0] 
-        #             model_name = root_span.attributes.get("model", "Unknown Model")
+                    # C. Extract the model name from the root span attributes
+                    root_span = trace.data.spans[0] 
+                    model_name = root_span.attributes.get("model", "Unknown Model")
+                    full_request = trace.data.request
+                    full_response = trace.data.response
                             
-        #             # 3. Print out metrics
-        #             #print(f"\n[Trace ID]: {trace_id}")
-        #             print(f" Model Involved: {model_name}")
-        #             print(f" Status: {status}")
-        #             print(f" Total Latency: {latency_ms} ms ({latency_sec:.2f} seconds)")
-        #             print(f" Prompt token count: {promptTokens}\n")
+                    # 3. Print out metrics
+                    #print(f"\n[Trace ID]: {trace_id}")
+                    print(f" Model Involved: {model_name}")
+                    print(f" Status: {status}")
+                    print(f" Total Latency: {latency_ms} ms ({latency_sec:.2f} seconds)")
+                    #print(f" Completion Tokens: {completionTokens}")
+                    print(f" Full requests:{full_request}\n")
+                    print(f" Full response:{full_response}\n")
+                    #print(f" Prompt token count: {promptTokens}\n")
                 else:
-                    print("\nNo active trace ID recorded by autologger.")    
-            
-                                      
+                    print("\nNo active trace ID recorded by autologger.")      
+                                        
             except Exception as e:
-                print("\n" + "="*40 + " Error in collecting Trace Info ACTUAL ERROR CAUGHT " + "="*40)
-                print(f"Error Type: {type(e).__name__}")
-                print(f"Error Message: {e}")
-                return False #, ""  
+                    print(f"\n[ERROR in experimentRun collecting Trace Info] Python crashed with: {e}", file=sys.stderr)
+                    return False   
                 
         return True, strAnswer    # if we got this far, everything went OK
          
@@ -877,6 +915,7 @@ def main_search_embeddings(user_question, search_limit=5):
         
 def main_summarise_reply(context, user_question):
     try:
+        
         os.environ["MLFLOW_ENABLE_ASYNC_TRACE_LOGGING"] = "false" # Force MLflow to log traces synchronously before the script exits
         ollama_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1") # Read from the environment variable ("OLLAMA_BASE_URL" will exist in the Docker gateway), or fall back to localhost if it doesn't exist
         
@@ -934,7 +973,7 @@ def all_main_pipeline(msg_queue=None, selection_x=None):
         
         str_Progress, all_chunks = main_download_prepare_chunk()
                 
-        status_msg = "Generating Embedding Chunks, saving as Vectors"
+        status_msg = "Generating text chunks"
         if msg_queue:
             msg_queue.put(status_msg)  # Send to Q
         else:
