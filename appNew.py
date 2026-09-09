@@ -1,18 +1,15 @@
 # 07. Sept. 2026 - pip install mlflow
-    # run everytime a new terminal with 'mlflow server'
-
-# python -m streamlit run streamlit_test.py [--DATA_ROOT_DIR="/home/christopher/Downloads/Databricks"]
 
 # 3 september install: python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 
-
-### 31st of August update to Milvus Lite
-# pip install --upgrade pymilvus milvus-lite
+# 31st of August update to Milvus Lite: pip install --upgrade pymilvus milvus-lite
 
 # *********************************************************************************************************
 
 # To run this file locally from the terminal use:
-    # export DATA_ROOT_DIR="/home/christopher/Downloads/Databricks"
+    # run everytime a new terminal with 'mlflow server'
+    # export DATA_ROOT_DIR="/home/christopher/Downloads/Databricks"  # OR # python -m appNew.py [--DATA_ROOT_DIR="/home/christopher/Downloads/Databricks"]
+    # export GRADIO_SERVER_PORT=7862 # need to set this if we are exposing public link through ngrok 
     # python appNew.py
 
 # *********************************************************************************************************
@@ -1025,13 +1022,13 @@ def ui_pipeline_wrapper():
             if msg is None:
                 break
             final_result = msg
-            yield msg, gr.update(visible=False), gr.update(visible=False) # Keep LLM section hidden while running
+            yield msg, gr.update(visible=False), gr.update(visible=False), gr.Button("Run Pipeline Once", interactive = False) # Keep LLM section hidden while running
         except queue.Empty:
             continue
             
     # PIPELINE FINISHED:
     # must be a yield rather than a return because the first use of yield in the while statement, turns this whole function into a generator. 
-    yield f"Pipeline Complete!", final_result, gr.update(visible=True) 
+    yield f"Pipeline Complete!", final_result, gr.update(visible=True), gr.Button("Run Pipeline Once", interactive = False)  
     
     
 
@@ -1050,7 +1047,7 @@ def main_query_llm(pipeline_context, user_question):
     final_summary_answer = ""
     str_Progress, final_summary_answer = main_summarise_reply(combined_context, user_question) 
            
-    return f"{final_summary_answer}"    
+    return f"{final_summary_answer}"   
 
 def ui_theme_change(selection_x):
     
@@ -1068,7 +1065,7 @@ def ui_theme_change(selection_x):
             Global_documents = documents_elderlycare
         case _:
             print("Theme Selection NOT GOOD! Swapping to default")  # Default case
-            Global_documents = documents_ederlycare
+            Global_documents = documents_elderlycare
    
     print(f"User selection, first document in dictionary: {Global_documents}") 
      
@@ -1087,8 +1084,8 @@ with gr.Blocks() as demo:
     pipeline_state = gr.State()
             
     # THE PIPELINE (Runs Once) ---
-    with gr.Group():
-        gr.Markdown("Start here: Build Data Pipeline: Please choose your pipeline interest:")
+    with gr.Group() as app:
+        gr.Markdown("Start here: Build Data Pipeline: Please choose your topic of interest:")
                 
         flavor_dropdown = gr.Dropdown(
             choices=["Skin Care", "Covid-19", "Care for the Elderly"], 
@@ -1111,17 +1108,16 @@ with gr.Blocks() as demo:
     # 1. Clicking the pipeline button updates the status box, saves data to state, and reveals the LLM section
     run_pipeline_btn.click(
         fn=ui_pipeline_wrapper, 
-        outputs=[pipeline_status, pipeline_state, llm_section]
+        outputs=[pipeline_status, pipeline_state, llm_section, run_pipeline_btn]
     )
     
     # 2. Clicking the query button reads from the saved state and the textbox, outputting only to the LLM response box
     submit_query_btn.click(
         fn=main_query_llm,
         inputs=[pipeline_state, user_query_input],
-        outputs=llm_output
+        outputs=[llm_output]
     )
     
-   
     flavor_dropdown.change(
         fn=ui_theme_change, 
         inputs=flavor_dropdown, 
