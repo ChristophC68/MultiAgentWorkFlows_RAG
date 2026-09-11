@@ -1,3 +1,6 @@
+# 11. September: DATA_ROOT_DIR="/home/christopher/Downloads/Databricks" nohup /home/christopher/Development/Python/MultiAgentWorkFlows/.venv/bin/python -u appNew.py > gradio.log 2>&1 &
+
+
 # 07. Sept. 2026 - pip install mlflow
 
 # 3 september install: python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
@@ -104,7 +107,10 @@ saveFormat = "parquet"
 VECTOR_SEARCH_LIMIT = 5
 
 # 'all-MiniLM-L6-v2' generates 384-dimensional vectors, but only a maximum context length of 512 tokens.
-str_SentenceTransformer = 'BAAI/bge-base-en-v1.5'
+# str_SentenceTransformer = 'BAAI/bge-base-en-v1.5'
+# embedding_dim = 768
+str_SentenceTransformer = 'all-MiniLM-L6-v2'
+embedding_dim = 384
 
 model_LLM ='qwen2.5:latest'
 
@@ -580,7 +586,7 @@ def start_Milvus(collection_name, str_milvus_path, embedding_dim):
 
 
 
-def generate_embeddings(texts_list, msg_Q):
+def generate_embeddings(texts_list):
     try:
     
         # Generate the Vector Embeddings
@@ -589,11 +595,11 @@ def generate_embeddings(texts_list, msg_Q):
         
         # Initialize the local Embedding Model 
         print("\nInitializing sentence-transformers model...")
-        # msg_Q.put("Initializing sentence-transformers model...")
-        
+                
         # Force the Hugging Face transformer model to run strictly on CPU, GPU too small
         model = SentenceTransformer(str_SentenceTransformer, device='cpu')
         embeddings = model.encode(texts_list, show_progress_bar=True)
+        # query_vector = model.encode(user_question).tolist()
         
         print("...text embeddings generated.")
         return embeddings
@@ -821,9 +827,9 @@ def main_generate_vectors_and_save(all_chunks, msg_Q=None):
         # At the moment we are passing too much into this function, we don't want the chunks_list because it contains more than just text
         
         # Force the Hugging Face transformer model to run strictly on CPU, GPU too small
-        model = SentenceTransformer(str_SentenceTransformer, device='cpu')
+        # model = SentenceTransformer(str_SentenceTransformer, device='cpu')
         embeddings = None
-        embeddings = generate_embeddings(chunk_texts_only, model) # we are deliberately only passing the texts into here
+        embeddings = generate_embeddings(chunk_texts_only) # we are deliberately only passing the texts into here
         
         insert_result = False
         # THE EMBEDDINGS NEED TO BE COMBINED WITH THE all_chunks (original text, id and source), and then everything can be added to the collection
@@ -857,7 +863,10 @@ def main_search_embeddings(user_question, search_limit=5):
         # Vectorize the question using the same transformer model
         # Force the Hugging Face transformer model to run strictly on CPU, GPU too small
         model = SentenceTransformer(str_SentenceTransformer, device='cpu')
-        query_vector = model.encode(user_question).tolist()
+        # query_vector = model.encode(user_question).tolist()
+        query_vector = model.encode(user_question)
+        
+        
         # Query local Milvus Lite collection
         print("Connecting to local Milvus Lite to search for relevant chunks...")
         
@@ -946,7 +955,7 @@ def main_summarise_reply(context, user_question):
         with open(logLLM, "w") as log_file:
             traceback.print_exc(file=log_file)
         print(F"\n[INFO] Full error log has also been saved to {logLLM}.")   
-        return "Failure", strAnswer     
+        return "Failure", ""     
     
     
  
@@ -957,6 +966,7 @@ def all_main_pipeline(msg_queue=None, selection_x=None):
     Actual main routine in its own thread. 
     Sends updates to UI via a Queue.
     """  
+    
     try:    
         all_chunks = []       
         str_Progress = ""
@@ -995,7 +1005,7 @@ def all_main_pipeline(msg_queue=None, selection_x=None):
         with open(logLLM, "w") as log_file:
             traceback.print_exc(file=log_file)
         print(F"\n[INFO] Full error log has also been saved to {logLLM}.")   
-        return "Failure", strAnswer     
+        return "Failure", ""     
     finally:
         msg_queue.put(None)
 
@@ -1007,7 +1017,7 @@ def ui_pipeline_wrapper():
     
     # selection_x = "Skin Care"
      
-    # Spin up an entirely separate OS process for your main routine
+    # Spin up an entirely separate OS process for the main routine
     process = multiprocessing.Process(target=all_main_pipeline, args=(msg_queue,))
     process.start()
     
@@ -1026,28 +1036,86 @@ def ui_pipeline_wrapper():
         except queue.Empty:
             continue
             
+            
+    # Wait for the subprocess to finish its work
+    process.join(timeout=30) # Wait up to 60 seconds for it to finish cleanly
+
+    # Terminate it forcefully if it hung, just to be completely safe
+    if process.is_alive():
+        process.terminate()
+        process.join()
+
     # PIPELINE FINISHED:
     # must be a yield rather than a return because the first use of yield in the while statement, turns this whole function into a generator. 
     yield f"Pipeline Complete!", final_result, gr.update(visible=True), gr.Button("Run Pipeline Once", interactive = False)  
+
+
     
+def query_llm_worker(user_question, res_queue):
+    """Isolated process worker to handle vector search and LLM completion."""
+    # Ensure environment vars prevent thread-locking inside this fork
+    import os
+    os.environ["OMP_NUM_THREADS"] = "1"
+    os.environ["MKL_NUM_THREADS"] = "1"
+    
+    try:
+        # Perform embedding lookup and summarize
+        # res_queue.put("generating embedding for user question, and searching in vector\n")
+        str_Progress, combined_context = main_search_embeddings(user_question, VECTOR_SEARCH_LIMIT)
+        
+        # res_queue.put("sending the results to the LLM for summary\n")
+        str_Progress, final_summary_answer = main_summarise_reply(combined_context, user_question) 
+        
+        # Disconnect from Milvus before closing the process
+        try:
+            from pymilvus import connections
+            connections.disconnect("default") # dont want to leave the connection haning around
+        except Exception:
+            pass
+            
+        res_queue.put(final_summary_answer) # the only thing that we want to write to the queue because it ends up in the LLM answer box
+    except Exception as e:
+        res_queue.put(f"Error during query: {str(e)}")
     
 
-def main_query_llm(pipeline_context, user_question):
+#def main_query_llm(pipeline_context, user_question):
+def main_query_llm(user_question):
     
-    # user_question = "What are the primary safety guidelines regarding Covid-19?"
-    combined_context = None
-    str_Progress, combined_context = main_search_embeddings(user_question, VECTOR_SEARCH_LIMIT)
+    res_queue = multiprocessing.Queue() # different Q from the pipeline one
     
-    # status_msg = "Sending contexts and user question to LLM for summary"
-    # if msg_queue:
-    #     msg_queue.put(status_msg)  # Send to Q
-    # else:
-    #     print(f"[Standalone]: {status_msg}")  # Standalone fallback  
-            
-    final_summary_answer = ""
-    str_Progress, final_summary_answer = main_summarise_reply(combined_context, user_question) 
-           
-    return f"{final_summary_answer}"   
+    # Spawn an isolated process for the second sentence-transformer call
+    query_proc = multiprocessing.Process(target=query_llm_worker, args=(user_question, res_queue))
+    query_proc.start()
+    
+    """ # code below might come in handy if a new text box was needed for info messages
+    # at the moment the LLM output box is reserved for just LLM output so we won't be writing adhoc messages to it
+    while True:
+        try:
+            msg = res_queue.get(timeout=0.1)
+            if msg is None:
+                break
+            final_result = msg
+            # yield msg, gr.update(visible=False), gr.update(visible=False), gr.Button("Run Pipeline Once", interactive = False) # Keep LLM section hidden while running
+        except queue.Empty:
+            continue """
+    
+    
+    # Wait for the answer and safely clean up
+    query_proc.join(timeout=40)
+    
+    if query_proc.is_alive():
+        query_proc.terminate()
+        query_proc.join()
+        return "Error: The query process timed out."
+        
+    try:
+        final_summary_answer = res_queue.get_nowait()
+    except Exception:
+        final_summary_answer = "Error: Failed to retrieve answer from pipeline process."
+        
+    return f"{final_summary_answer}"
+
+ 
 
 def ui_theme_change(selection_x):
     
@@ -1072,10 +1140,6 @@ def ui_theme_change(selection_x):
     return f"You selected: {selection_x}"
 
 
-# https://gradio.app/docs/gradio/group
-    # with gr.Group():
-    #     gr.Textbox(label="First")
-    #     gr.Textbox(label="Last")
         
 with gr.Blocks() as demo:
     gr.Markdown("Data Pipeline & LLM Query Interface")
@@ -1114,7 +1178,7 @@ with gr.Blocks() as demo:
     # 2. Clicking the query button reads from the saved state and the textbox, outputting only to the LLM response box
     submit_query_btn.click(
         fn=main_query_llm,
-        inputs=[pipeline_state, user_query_input],
+        inputs=[user_query_input], # used to include the pipeline_state
         outputs=[llm_output]
     )
     
@@ -1127,7 +1191,9 @@ with gr.Blocks() as demo:
 
 if __name__ == "__main__":
              
+    #demo.launch(server_name="127.0.0.1", server_port=7862) # only need a fixed port for ngrok to target
     demo.launch()
+
 
             
     # if __name__ == "__main__":  

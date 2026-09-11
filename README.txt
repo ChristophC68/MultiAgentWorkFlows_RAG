@@ -1,5 +1,9 @@
 ﻿README.txt
 
+11 September 2026
+Bug fix, when published through ngrok, the second user would hit a processing thread lock that happened only on the processing of the LLM. This is now fixed. 
+Also some addition support files, mainly the MLFlow prompts that will be needed.
+
 9th September 2026
 MLFlow bugs fixed. Full model request and response available for saving and inspecting along with other interesting parameter. 
 
