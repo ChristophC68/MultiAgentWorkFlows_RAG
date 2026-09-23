@@ -20,7 +20,7 @@ from boto3.dynamodb.types import TypeDeserializer
 
 dyno_endpoint_url= os.getenv("DYNAMODB", "http://127.0.0.1:8000")
 
-# Connect to local DynamoDB container running on port 8000
+# Connect to local DynamoDB container running on port 8001
 dynamodb = boto3.resource(
     "dynamodb",
     endpoint_url=dyno_endpoint_url,
@@ -165,23 +165,23 @@ if __name__ == "__main__":
     
     create_llm_traces_table() # this will only create the table if it doesn't already exist
         
-    insert_llm_record(
-        session_id="session_98765123",
-        trace_id="trace_1234512",
-        record_type="REQUEST",
-        data_dict=request_payload
-    )
+    # insert_llm_record(
+    #     session_id="session_98765123",
+    #     trace_id="trace_1234512",
+    #     record_type="REQUEST",
+    #     data_dict=request_payload
+    # )
 
-    insert_llm_record(
-        session_id="session_98765123",
-        trace_id="trace_1234512",
-        record_type="RESPONSE",
-        data_dict=response_payload
-    )
+    # insert_llm_record(
+    #     session_id="session_98765123",
+    #     trace_id="trace_1234512",
+    #     record_type="RESPONSE",
+    #     data_dict=response_payload
+    # )
     
-    allData = scanRecursive("LLMTraces")
-    for line in allData:
-        print(f"{line}\n")
+    # allData = scanRecursive("LLMTraces")
+    # for line in allData:
+    #     print(f"{line}\n")
     
     # clear out the table if we need to
     #truncateTable("LLMTraces")

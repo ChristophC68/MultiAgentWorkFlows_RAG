@@ -1,11 +1,34 @@
 ﻿README.txt
+Installation instructions:
+The Infrastructure runs as two separate stacks of docker containers:
+1) Core stack of Gateway, MLflow, Ollama
+2) Database stack of DynamoDB 
+
+The main python script appNew.py contains the functionality and uses Gradio as a UI frontend. 
+
+The other python script dynamo_scripts.py contains functionality for working with the database. It is imported by the appNew.py but needs to be run first time on its own (as main) so that the database will be created. I’ve hardcoded the database and table names (sorry) but they are easy to find. 
+
+Then running the appNew.py script will work once the environment variable to the local storage has been set (this is for saving downloaded files and the vector store).
+
+Lastly, the vector store being used is Milvus Lite which I installed locally too.
+
+
+22 September 2026
+Nginx Gateway stack added, the MLFlow and Ollama were moved into the stack and run as Docker containers (Ollama volume mapped back to local Ollama models). This latest GitHub version has been marked as a working baseline. A licence has been added so sharing and contributing is allowed.
+
+20 September 2026
+DynamoDB functionality added (via docker) to save the requests and responses on a user session basis.
+
+19 September 2026
+Major bug fix, if a pdf wasn’t available for download, the error was being caught at the wrong level and all downloads were cancelled, rather than the error being gracefully handled for the single file download.
+
 
 11 September 2026
-Bug fix, when published through ngrok, the second user would hit a processing thread lock that happened only on the processing of the LLM. This is now fixed. 
+Bug fix, when published through ngrok, the second user would hit a processing thread lock that happened only on the processing of the LLM question (rather than the pipeline build). This is now fixed. 
 Also some addition support files, mainly the MLFlow prompts that will be needed.
 
 9th September 2026
-MLFlow bugs fixed. Full model request and response available for saving and inspecting along with other interesting parameter. 
+MLFlow bugs fixed. Full model request and response available for saving and inspecting along with other interesting parameters. 
 
 8th September 2026
 MLFlow added to the code. This is important! :-)

@@ -17,15 +17,6 @@
 
 # *********************************************************************************************************
 
-# To run this from the terminal, but in docker use this
-#     #docker run --network="host" -v /home/christopher/Downloads/Databricks:/data rag-milvus-llm-qwen2.5
-
-# docker run --rm \
-#   --add-host=host.docker.internal:host-gateway \
-#   -e OLLAMA_HOST=http://host.docker.internal:11434 \
-#   -e DATA_ROOT_DIR=/data \
-#   rag-milvus-llm-qwen2.5:latest
-#  ...
 
 # *********************************************************************************************************
 
@@ -38,13 +29,11 @@
 # Use Hugging Face's sentence-transformers, open source embedding generation.
 
 # While Apache Spark natively knows how to handle Parquet binaries through its own Java engine, 
-# Pandas relies entirely on external Python libraries —specifically pyarrow —to open Parquet data layout structures on Ubuntu.
+# Pandas relies entirely on external Python libraries —specifically pyarrow —to open Parquet data on Ubuntu.
 import logging
 import traceback
 import pymupdf
 import re
-#import databricks.sdk as sdk
-#import databricks.ai_search as bvs
 
 import os
 import pandas as pd
@@ -78,8 +67,11 @@ import sys
 import random # used for faking session ids
 import ast
 
-MLFLOW_TRACKING_URI = "http://127.0.0.1:5000"
-OLLAMA_BASE_URL = "http://localhost:11434/v1"
+
+# Point both tracking and model engines directly to the Gateway container entry point!
+gateway_url = os.getenv("GATEWAY_BASE_URL", "http://localhost:8079")
+MLFLOW_TRACKING_URI = gateway_url       # previously "http://127.0.0.1:5000"
+OLLAMA_BASE_URL = f"{gateway_url}/v1"   # previously "http://localhost:11434/v1"
 DYNAMODB = "http://127.0.0.1:8000"
 
 BOOL_INCLUDE_YIELD = True # need this to only be true if this is being called as a module from the UI  
@@ -92,7 +84,7 @@ logMILVUS = "error_log_MILVUS.txt"
 logLLM = "error_logLLM.txt"
 logVECTOR = "error_logVECTOR.txt"
 logDOWNLOAD = "error_logDOWNLOAD.txt"
-logEMBEDDING = "error_logEMBEDDING"
+logEMBEDDING = "error_logEMBEDDING.txt"
 
 chunk_size=20
 overlap = 10
@@ -331,13 +323,6 @@ def extract_pdf_text(pdf_path):
             page_text = page.get_text()
             full_text += page_text
 
-            # # Show statistics for the first few pages
-            # if page_number <= 3:
-            #     print(
-            #         f"Page {page_number}: "
-            #         f"{len(page_text)} characters"
-            #     )
-
         print(f"RAW extracted characters: {len(full_text)}")
         
         cleaned_text = clean_text(full_text)
@@ -477,7 +462,6 @@ def save_Chunks_To_Disk(all_chunks, strPath, saveFormat="delta"):
         # 1. Manually initialize the spark session locally
         # spark = SparkSession.builder.appName("NoDatabricks_onlyLocal").getOrCreate()
         # running locally so reduce concurrent spark writers from 8 parallel writers to 4 
-        
         spark = SparkSession.builder.appName("onlyLocal").config("spark.driver.memory", "4g").getOrCreate()
 
         chunk_df = pd.DataFrame(all_chunks)
@@ -630,13 +614,11 @@ def save_embeddings_in_vectorstore(chunk_texts_only, chunk_sources, chunk_ids, e
     try:
         insert_result = False
         print("\nIn save_embeddings_in_vectorstore")
-        
-        
+                
         # Warm up Milvus - using helper start_Milvus
         milvus_client = None
         milvus_client = start_Milvus(RAG_collection_name, str_milvus_path, embedding_dim)
-        
-              
+                      
         # Prepare and Insert Data
         print("\nFormatting data for Milvus Lite...")
         
@@ -1166,7 +1148,7 @@ def main_query_llm(user_question):
     
     
     # Wait for the answer and safely clean up
-    query_proc.join(timeout=60)
+    query_proc.join(timeout=70)
     
     if query_proc.is_alive():
         query_proc.terminate()

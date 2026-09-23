@@ -1,0 +1,33 @@
+services:
+  # 1. The Traffic Gateway (API Gateway)
+  api-gateway:
+    image: nginx:alpine
+    container_name: api-gateway
+    ports:
+      - "8079:8079"  # my calling script will talk to http://localhost:8079
+    volumes: # volumes are just persistent data stores but they are completely managed by docker, so good for passing data between containers, not for accessing files from the host.
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro  # ro means read only
+    depends_on:
+      - ollama
+      - mlflow-server
+
+  # 2. Local LLM Service
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama-service
+    # No external ports exposed to localhost! Only the gateway can talk to it over the internal network.
+    volumes:
+      - ollama_storage:/root/.ollama  # container storage for downloaded models
+
+  # 3. MLflow Tracking Service
+  mlflow-server:
+    image: ghcr.io/mlflow/mlflow:latest
+    container_name: mlflow-service
+    # No ports exposed to localhost! Only the gateway can talk to it over the internal network.
+    command: mlflow server --host 0.0.0.0 --port 5000 --default-artifact-root ./mlruns
+    volumes:
+      - mlflow_storage:/mlruns
+
+volumes:
+  ollama_storage:
+  mlflow_storage:

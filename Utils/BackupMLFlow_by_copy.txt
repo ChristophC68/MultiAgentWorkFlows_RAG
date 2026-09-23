@@ -1,0 +1,1 @@
+﻿cp /home/christopher/Development/Python/MultiAgentWorkFlows/mlflow.db /run/media/christopher/external/backup/mlflow_$(date +%F).db
